@@ -7,8 +7,10 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+argh = "*"
 anyhow = '1'
 bstr = "0.2"
+aho-corasick = "*"
 object = "0.19"
 memmap = "0.7"
 rustc-demangle = "0.1"
