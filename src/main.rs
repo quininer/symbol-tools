@@ -24,7 +24,7 @@ struct Options {
 
     /// sort by size
     #[argh(switch)]
-    sort: bool
+    sort: bool,
 }
 
 struct Filter<'a, 'data> {
@@ -107,13 +107,15 @@ fn main() -> anyhow::Result<()> {
         filter.for_each(|name, symbol| {
             symbolset.insert(
                 SizeAddr(symbol.size(), symbol.address()),
-                (symbol.kind(), Vec::from(name))
+                (symbol.clone(), Vec::from(name))
             );
 
             Ok(())
         })?;
 
-        for (SizeAddr(size, addr), (kind, name)) in symbolset {
+        for (SizeAddr(size, addr), (symbol, name)) in symbolset {
+            let kind = symbol.kind();
+
             count += size;
 
             writeln!(&mut stdout, "{:?}\t{:018p}\t{}\t\t{}", kind, addr as *const (), size, name.as_bstr())?;
