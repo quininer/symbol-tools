@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use aho_corasick::AhoCorasick;
 use bstr::ByteSlice;
 use memmap::Mmap;
-use object::Object;
+use object::{ Object, SymbolKind };
 use object::read::Symbol;
 use rustc_demangle::demangle;
 use argh::FromArgs;
@@ -50,6 +50,10 @@ impl<'a, 'data> Filter<'a, 'data> {
         let mut namebuf = Vec::new();
 
         for symbol in self.object.symbol_map().symbols() {
+            if symbol.kind() != SymbolKind::Text {
+                continue
+            }
+
             if let Some(mangled_name) = symbol.name().filter(|name| !name.is_empty()) {
                 write!(&mut namebuf, "{}", demangle(mangled_name))?;
                 let name = namebuf.as_bytes();
