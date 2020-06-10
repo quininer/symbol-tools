@@ -1,5 +1,5 @@
 [package]
-name = "search-symbol"
+name = "sym"
 version = "0.1.0"
 authors = ["quininer <quininer@live.com>"]
 edition = "2018"
@@ -7,10 +7,10 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-argh = "*"
+argh = "0.1"
 anyhow = '1'
 bstr = "0.2"
-aho-corasick = "*"
+aho-corasick = "0.7"
 object = "0.19"
 memmap = "0.7"
 rustc-demangle = "0.1"
