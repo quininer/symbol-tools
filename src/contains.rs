@@ -8,7 +8,6 @@ use memmap::Mmap;
 use object::Object;
 use rustc_demangle::demangle;
 use argh::FromArgs;
-use crate::common::collect_map;
 
 
 /// Cross-platform Symbol Finder
@@ -37,8 +36,6 @@ impl Options {
             eprintln!("WARN: The new file is missing debug symbols.");
         }
 
-        let obj_map = collect_map(oobj.symbol_map().symbols());
-
         let mut input = BTreeSet::new();
 
         // llvm-nm -f bsd ./<your ar>
@@ -60,7 +57,7 @@ impl Options {
 
             match words.next() { // symbol name
                 Some(name) => {
-                    input.insert(format!("{:#}", demangle(name)));
+                    input.insert(name.to_owned());
                 },
                 None => ()
             }
@@ -69,15 +66,31 @@ impl Options {
         })?;
 
         let mut count = 0;
+        let mut namebuf = Vec::new();
 
         let stdout = io::stdout();
         let mut stdout = stdout.lock();
 
-        for name in input {
-            if let Some(&(addr, size)) = obj_map.get(name.as_bytes()) {
+        for symbol in oobj.symbol_map().symbols() {
+            if symbol.kind() != object::SymbolKind::Text {
+                continue
+            }
+
+            if let Some(mangled_name) = symbol.name().filter(|name| !name.is_empty()) {
+                if !input.contains(mangled_name) {
+                    continue
+                }
+
+                namebuf.clear();
+                write!(&mut namebuf, "{}", demangle(mangled_name))?;
+                let name = namebuf.as_bytes();
+
+                let addr = symbol.address();
+                let size = symbol.size();
+
                 count += size;
 
-                writeln!(&mut stdout, "{:018p}\t{}\t\t{}", addr as *const (), size, name)?;
+                writeln!(&mut stdout, "{:018p}\t{}\t\t{}", addr as *const (), size, name.as_bstr())?;
             }
         }
 
