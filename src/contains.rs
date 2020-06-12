@@ -57,7 +57,7 @@ impl Options {
 
             match words.next() { // symbol name
                 Some(name) => {
-                    input.insert(name.to_owned());
+                    input.insert(format!("{:#}", demangle(name)).into_bytes());
                 },
                 None => ()
             }
@@ -77,13 +77,13 @@ impl Options {
             }
 
             if let Some(mangled_name) = symbol.name().filter(|name| !name.is_empty()) {
-                if !input.contains(mangled_name) {
+                namebuf.clear();
+                write!(&mut namebuf, "{:#}", demangle(mangled_name))?;
+                let name = namebuf.as_bytes();
+
+                if !input.contains(name) {
                     continue
                 }
-
-                namebuf.clear();
-                write!(&mut namebuf, "{}", demangle(mangled_name))?;
-                let name = namebuf.as_bytes();
 
                 let addr = symbol.address();
                 let size = symbol.size();
