@@ -44,7 +44,11 @@ impl<'a, 'data> Filter<'a, 'data> {
     where
         F: FnMut(&[u8], &Symbol<'data>) -> anyhow::Result<()>
     {
-        let ac = AhoCorasick::new(self.keywords);
+        let ac = if self.keywords.is_empty() {
+            None
+        } else {
+            Some(AhoCorasick::new(self.keywords))
+        };
         let mut namebuf = Vec::new();
 
         for symbol in self.object.symbol_map().symbols() {
@@ -56,7 +60,11 @@ impl<'a, 'data> Filter<'a, 'data> {
                 write!(&mut namebuf, "{}", demangle(mangled_name))?;
                 let name = namebuf.as_bytes();
 
-                if ac.is_match(&name) || self.keywords.iter().any(|w| mangled_name.ends_with(w)) {
+                if ac.as_ref()
+                    .map(|ac| ac.is_match(&name))
+                    .unwrap_or(true)
+                    || self.keywords.iter().any(|w| mangled_name.ends_with(w))
+                {
                     f(name, symbol)?;
                 }
 
@@ -73,10 +81,6 @@ impl Options {
         let Options { file, keywords, sort } = self;
 
         let fd = fs::File::open(&file)?;
-
-        if keywords.is_empty() {
-            return Err(anyhow::format_err!("search keyword is empty"));
-        }
 
         let mmap = unsafe { Mmap::map(&fd)? };
         let object = object::File::parse(mmap.as_ref())?;
