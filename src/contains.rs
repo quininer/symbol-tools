@@ -2,10 +2,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::collections::BTreeSet;
 use std::io::{ self, Write, BufReader };
+use anyhow::Context;
 use bstr::ByteSlice;
 use bstr::io::BufReadExt;
 use memmap::Mmap;
-use object::Object;
+use object::{ Object, ObjectSymbolTable, ObjectSymbol };
 use rustc_demangle::demangle;
 use argh::FromArgs;
 
@@ -55,11 +56,9 @@ impl Options {
                 _ => return Ok(true)
             }
 
-            match words.next() { // symbol name
-                Some(name) => {
-                    input.insert(format!("{:#}", demangle(name)).into_bytes());
-                },
-                None => ()
+            // symbol name
+            if let Some(name) = words.next() {
+                input.insert(format!("{:#}", demangle(name)).into_bytes());
             }
 
             Ok(true)
@@ -71,12 +70,15 @@ impl Options {
         let stdout = io::stdout();
         let mut stdout = stdout.lock();
 
-        for symbol in oobj.symbol_map().symbols() {
+        let symbol_table = oobj.symbol_table()
+            .context("not found symbol_table")?;
+
+        for symbol in symbol_table.symbols() {
             if symbol.kind() != object::SymbolKind::Text {
                 continue
             }
 
-            if let Some(mangled_name) = symbol.name().filter(|name| !name.is_empty()) {
+            if let Some(mangled_name) = symbol.name().ok().filter(|name| !name.is_empty()) {
                 namebuf.clear();
                 write!(&mut namebuf, "{:#}", demangle(mangled_name))?;
                 let name = namebuf.as_bytes();

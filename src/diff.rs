@@ -3,8 +3,9 @@ use std::rc::Rc;
 use std::path::PathBuf;
 use std::collections::HashMap;
 use std::io::{ self, Write };
+use anyhow::Context;
 use memmap::Mmap;
-use object::Object;
+use object::{ Object, ObjectSymbolTable };
 use bstr::ByteSlice;
 use argh::FromArgs;
 use crate::common::collect_map;
@@ -78,8 +79,8 @@ impl Options {
             eprintln!("WARN: The new file is missing debug symbols.");
         }
 
-        let old_map = collect_map(old_obj.symbol_map().symbols());
-        let new_map = collect_map(new_obj.symbol_map().symbols());
+        let old_map = collect_map(old_obj.symbol_table().context("no found symbol table")?.symbols());
+        let new_map = collect_map(new_obj.symbol_table().context("no found symbol table")?.symbols());
 
         let stdout = io::stdout();
         let mut stdout = stdout.lock();

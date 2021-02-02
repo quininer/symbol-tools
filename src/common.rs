@@ -1,19 +1,23 @@
 use std::rc::Rc;
 use std::collections::HashMap;
-use object::{ Symbol, SymbolKind };
+use object::{ Symbol, SymbolKind, ObjectSymbol };
 use rustc_demangle::demangle;
 
 
-pub fn collect_map(symbols: &[Symbol<'_>]) -> HashMap<Rc<[u8]>, (u64, u64)> {
+pub fn collect_map<'data, T: 'data>(symbols: T)
+    -> HashMap<Rc<[u8]>, (u64, u64)>
+where
+    T: Iterator<Item = Symbol<'data, 'data>>
+{
     let mut map: HashMap<Rc<[u8]>, (u64, u64)> = HashMap::new();
 
     for symbol in symbols
-            .iter()
             .filter(|symbol| symbol.kind() == SymbolKind::Text)
     {
         if let Some(name) = symbol.name()
+            .ok()
             .filter(|name| !name.is_empty())
-            .map(|name| format!("{:#}", demangle(name))) // TODO strip tail
+            .map(|name| format!("{:#}", demangle(name)))
             .map(|name| Rc::from(name.into_bytes().into_boxed_slice()))
         {
             let addr = symbol.address();

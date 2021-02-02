@@ -1,11 +1,11 @@
 use std::fs;
 use std::io::{ self, Write };
 use std::path::PathBuf;
+use anyhow::Context;
 use aho_corasick::AhoCorasick;
 use bstr::ByteSlice;
 use memmap::Mmap;
-use object::{ Object, SymbolKind };
-use object::read::Symbol;
+use object::{ Object, Symbol, SymbolKind, ObjectSymbolTable, ObjectSymbol };
 use rustc_demangle::demangle;
 use argh::FromArgs;
 
@@ -42,7 +42,7 @@ impl<'a, 'data> Filter<'a, 'data> {
 
     fn for_each<F>(&self, mut f: F) -> anyhow::Result<()>
     where
-        F: FnMut(&[u8], &Symbol<'data>) -> anyhow::Result<()>
+        F: FnMut(&[u8], Symbol) -> anyhow::Result<()>
     {
         let ac = if self.keywords.is_empty() {
             None
@@ -51,12 +51,15 @@ impl<'a, 'data> Filter<'a, 'data> {
         };
         let mut namebuf = Vec::new();
 
-        for symbol in self.object.symbol_map().symbols() {
+        let symbol_table = self.object.symbol_table()
+            .context("not found symbol_table")?;
+
+        for symbol in symbol_table.symbols() {
             if symbol.kind() != SymbolKind::Text {
                 continue
             }
 
-            if let Some(mangled_name) = symbol.name().filter(|name| !name.is_empty()) {
+            if let Some(mangled_name) = symbol.name().ok().filter(|name| !name.is_empty()) {
                 write!(&mut namebuf, "{}", demangle(mangled_name))?;
                 let name = namebuf.as_bytes();
 
