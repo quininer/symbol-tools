@@ -29,7 +29,11 @@ pub struct Options {
 
     /// sort by size
     #[argh(switch)]
-    sort: bool
+    sort: bool,
+
+    /// sum outlined function
+    #[argh(switch)]
+    sum_outlined: bool
 }
 
 pub struct Differ<'a>(&'a HashMap<Rc<[u8]>, (u64, u64)>, &'a HashMap<Rc<[u8]>, (u64, u64)>, bool);
@@ -79,8 +83,14 @@ impl Options {
             eprintln!("WARN: The new file is missing debug symbols.");
         }
 
-        let old_map = collect_map(old_obj.symbol_table().context("no found symbol table")?.symbols());
-        let new_map = collect_map(new_obj.symbol_table().context("no found symbol table")?.symbols());
+        let old_map = collect_map(
+            old_obj.symbol_table().context("no found symbol table")?.symbols(),
+            self.sum_outlined
+        );
+        let new_map = collect_map(
+            new_obj.symbol_table().context("no found symbol table")?.symbols(),
+            self.sum_outlined
+        );
 
         let stdout = io::stdout();
         let mut stdout = stdout.lock();
