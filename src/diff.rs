@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 use std::io::{ self, Write };
 use anyhow::Context;
-use memmap::Mmap;
+use memmap2::Mmap;
 use object::{ Object, ObjectSymbolTable };
 use bstr::ByteSlice;
 use argh::FromArgs;

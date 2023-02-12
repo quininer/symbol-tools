@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use aho_corasick::AhoCorasick;
 use bstr::ByteSlice;
-use memmap::Mmap;
+use memmap2::Mmap;
 use object::{ Object, Symbol, SymbolKind, ObjectSymbolTable, ObjectSymbol };
 use rustc_demangle::demangle;
 use argh::FromArgs;

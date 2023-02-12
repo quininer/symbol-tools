@@ -5,7 +5,7 @@ use std::io::{ self, Write, BufReader };
 use anyhow::Context;
 use bstr::ByteSlice;
 use bstr::io::BufReadExt;
-use memmap::Mmap;
+use memmap2::Mmap;
 use object::{ Object, ObjectSymbolTable, ObjectSymbol };
 use rustc_demangle::demangle;
 use argh::FromArgs;
@@ -29,7 +29,7 @@ impl Options {
         let afd = fs::File::open(&self.ar)?;
         let ofd = fs::File::open(&self.obj)?;
 
-        let areader = BufReader::new(afd);
+        let mut areader = BufReader::new(afd);
         let omap = unsafe { Mmap::map(&ofd)? };
         let oobj = object::File::parse(omap.as_ref())?;
 
