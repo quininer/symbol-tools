@@ -47,7 +47,7 @@ impl<'a, 'data> Filter<'a, 'data> {
         let ac = if self.keywords.is_empty() {
             None
         } else {
-            Some(AhoCorasick::new(self.keywords))
+            Some(AhoCorasick::new(self.keywords)?)
         };
         let mut namebuf = Vec::new();
 
