@@ -2,6 +2,7 @@ mod common;
 mod search;
 mod diff;
 mod contains;
+mod link;
 
 use argh::FromArgs;
 
@@ -17,7 +18,8 @@ struct Options {
 enum Command {
     Search(search::Options),
     Diff(diff::Options),
-    Contains(contains::Options)
+    Contains(contains::Options),
+    Link(link::Options)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -26,6 +28,7 @@ fn main() -> anyhow::Result<()> {
     match options.command {
         Command::Search(cmd) => cmd.exec(),
         Command::Diff(cmd) => cmd.exec(),
-        Command::Contains(cmd) => cmd.exec()
+        Command::Contains(cmd) => cmd.exec(),
+        Command::Link(cmd) => cmd.exec()
     }
 }
