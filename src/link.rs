@@ -377,29 +377,31 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
     }
 
     fn dump<'cache>(&self, cache: &'cache mut Cache, sym: &Symbol) -> anyhow::Result<DoubleLife<'cache, 'buf, [u8]>> {
+        use std::collections::hash_map::Entry;
+
         let cache_idx = (sym.pos.obj_idx, sym.section_idx);
 
-        // TODO section addr range
+        match cache.decompress_sections.entry(cache_idx) {
+            Entry::Occupied(entry) => {
+                let (section_addr, data) = entry.into_mut();
+                data_range(data, *section_addr, sym.address, sym.size)
+                    .map(DoubleLife::Left)
+            },
+            Entry::Vacant(entry) => {
+                let obj = &self.list[sym.pos.obj_idx];
+                let section = obj.file.section_by_index(sym.section_idx)?;
+                let section_addr = section.address();
 
-        if let Some((section_addr, data)) = cache.decompress_sections.get(&cache_idx) {
-            data_range(data, *section_addr, sym.address, sym.size)
-                .map(DoubleLife::Left)
-        } else {
-            let obj = &self.list[sym.pos.obj_idx];
-            let section = obj.file.section_by_index(sym.section_idx)?;
-            let section_addr = section.address();
-
-            match section.uncompressed_data()? {
-                Cow::Borrowed(data) => data_range(data, section_addr, sym.address, sym.size)
-                    .map(DoubleLife::Right),
-                Cow::Owned(data) => {
-                    let data = cache.decompress_sections
-                        .entry(cache_idx)
-                        .or_insert((section_addr, data))
-                        .1
-                        .as_slice();
-                    data_range(data, section_addr, sym.address, sym.size)
-                        .map(DoubleLife::Left)
+                match section.uncompressed_data()? {
+                    Cow::Borrowed(data) => data_range(data, section_addr, sym.address, sym.size)
+                        .map(DoubleLife::Right),
+                    Cow::Owned(data) => {
+                        let data = entry.insert((section_addr, data))
+                            .1
+                            .as_slice();
+                        data_range(data, section_addr, sym.address, sym.size)
+                            .map(DoubleLife::Left)
+                    }
                 }
             }
         }
