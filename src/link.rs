@@ -3,6 +3,7 @@ use std::io::Write;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use aho_corasick::AhoCorasick;
 use anyhow::Context;
 use argh::FromArgs;
@@ -13,7 +14,7 @@ use object::read::archive::ArchiveFile;
 use object::read::File;
 use memmap2::Mmap;
 use indexmap::IndexMap;
-use crate::common::IteratorExt;
+use crate::common::{ IteratorExt, DoubleLife, data_range };
 
 
 /// Cross-platform Symbol Explorer
@@ -122,10 +123,11 @@ fn explorer(list: &[ObjectFile<'_>]) -> anyhow::Result<()> {
     let mut rl = rustyline::DefaultEditor::with_config(config)?;
 
     let mut explorer = Explorer::build(list)?;
+    let mut cache = Cache::default();
 
     loop {
         match rl.readline("explorer > ") {
-            Ok(line) => if let Err(err) = exec(&mut explorer, &line) {
+            Ok(line) => if let Err(err) = exec(&mut explorer, &mut cache, &line) {
                 eprintln!("failed: {:?}", err);
             },
             Err(ReadlineError::WindowResized) => (),
@@ -137,7 +139,9 @@ fn explorer(list: &[ObjectFile<'_>]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, line: &str) -> anyhow::Result<()> {
+fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, cache: &mut Cache, line: &str)
+    -> anyhow::Result<()>
+{
     let mut iter = line.trim().split_whitespace();
 
     match iter.next() {
@@ -203,7 +207,8 @@ fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, line: &str) -> anyhow::Result<(
             };
 
             let sym = explorer.index(pos)?;
-            let data = explorer.dump(&sym)?;
+            let data = explorer.dump(cache, &sym)?;
+            let data = data.as_ref();
 
             if matches!(sym.kind, 't' | 'T') {
                 let insns = explorer.disasm.disasm_all(data, sym.address)
@@ -213,6 +218,7 @@ fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, line: &str) -> anyhow::Result<(
                     println!("{}", ins);
                 }
             } else {
+                println!("TODO");
                 // TODO print hex
             }
         },
@@ -229,7 +235,12 @@ struct Explorer<'a, 'buf> {
     #[allow(dead_code)] arch: object::Architecture,
     format: object::BinaryFormat,
     disasm: capstone::Capstone,
-    symbol_map: IndexMap<&'buf str, Vec<SymbolPosition>>
+    symbol_map: IndexMap<&'buf str, Vec<SymbolPosition>>,
+}
+
+#[derive(Default)]
+struct Cache {
+    decompress_sections: HashMap<(usize, object::read::SectionIndex), (u64, Vec<u8>)>
 }
 
 #[derive(Clone, Copy)]
@@ -365,14 +376,33 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
         })
     }
 
-    fn dump(&self, sym: &Symbol) -> anyhow::Result<&'buf [u8]> {
-        let section = self.list[sym.pos.obj_idx]
-            .file
-            .section_by_index(sym.section_idx)?;
+    fn dump<'cache>(&self, cache: &'cache mut Cache, sym: &Symbol) -> anyhow::Result<DoubleLife<'cache, 'buf, [u8]>> {
+        let cache_idx = (sym.pos.obj_idx, sym.section_idx);
 
-        let data = section.data_range(sym.address, sym.size)?;
-        let data = data.context("the section does not contain the given range")?;
-        Ok(data)
+        // TODO section addr range
+
+        if let Some((section_addr, data)) = cache.decompress_sections.get(&cache_idx) {
+            data_range(data, *section_addr, sym.address, sym.size)
+                .map(DoubleLife::Left)
+        } else {
+            let obj = &self.list[sym.pos.obj_idx];
+            let section = obj.file.section_by_index(sym.section_idx)?;
+            let section_addr = section.address();
+
+            match section.uncompressed_data()? {
+                Cow::Borrowed(data) => data_range(data, section_addr, sym.address, sym.size)
+                    .map(DoubleLife::Right),
+                Cow::Owned(data) => {
+                    let data = cache.decompress_sections
+                        .entry(cache_idx)
+                        .or_insert((section_addr, data))
+                        .1
+                        .as_slice();
+                    data_range(data, section_addr, sym.address, sym.size)
+                        .map(DoubleLife::Left)
+                }
+            }
+        }
     }
 
     fn symbol_kind(&self, pos: SymbolPosition) -> char {

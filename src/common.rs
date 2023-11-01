@@ -88,3 +88,37 @@ where
         }
     }
 }
+
+pub enum DoubleLife<'a, 'b, T: ?Sized> {
+    Left(&'a T),
+    Right(&'b T)
+}
+
+impl<'a, 'b, T: ?Sized> AsRef<T> for DoubleLife<'a, 'b, T> {
+    fn as_ref(&self) -> &T {
+        match self {
+            DoubleLife::Left(t) => t,
+            DoubleLife::Right(t) => t
+        }
+    }
+}
+
+pub fn data_range<'data>(
+    data: &'data [u8],
+    data_address: u64,
+    range_address: u64,
+    size: u64
+)
+    -> anyhow::Result<&'data [u8]>
+{
+    use std::convert::TryInto;
+    use anyhow::Context;
+
+    let address = range_address.checked_sub(data_address).context("bad address")?;
+    let offset: usize = address.try_into().context("symbol address cast fail")?;
+    let size: usize = size.try_into().context("symbol size cast fail")?;
+
+    data.get(offset..)
+        .and_then(|data| data.get(..size))
+        .context("section range overflow")
+}
