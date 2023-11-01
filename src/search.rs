@@ -22,6 +22,10 @@ pub struct Options {
     #[argh(positional)]
     keywords: Vec<String>,
 
+    /// print not demangle symbol
+    #[argh(switch)]
+    no_demangle: bool,
+
     /// sort by size
     #[argh(switch)]
     sort: bool,
@@ -29,14 +33,17 @@ pub struct Options {
 
 struct Filter<'a, 'data> {
     object: object::File<'data>,
-    keywords: &'a [String]
+    keywords: &'a [String],
+    no_demangle: bool,
 }
 
 impl<'a, 'data> Filter<'a, 'data> {
-    fn new(obj: object::File<'data>, keywords: &'a [String]) -> Filter<'a, 'data> {
+    fn new(obj: object::File<'data>, keywords: &'a [String], no_demangle: bool)
+        -> Filter<'a, 'data>
+    {
         Filter {
             object: obj,
-            keywords
+            keywords, no_demangle
         }
     }
 
@@ -68,6 +75,11 @@ impl<'a, 'data> Filter<'a, 'data> {
                     .unwrap_or(true)
                     || self.keywords.iter().any(|w| mangled_name.ends_with(w))
                 {
+                    let name = if self.no_demangle {
+                        mangled_name.as_bytes()
+                    } else {
+                        name
+                    };
                     f(name, symbol)?;
                 }
 
@@ -81,7 +93,7 @@ impl<'a, 'data> Filter<'a, 'data> {
 
 impl Options {
     pub fn exec(self) -> anyhow::Result<()> {
-        let Options { file, keywords, sort } = self;
+        let Options { file, keywords, sort, no_demangle } = self;
 
         let fd = fs::File::open(&file)?;
 
@@ -92,7 +104,7 @@ impl Options {
             eprintln!("WARN: The file is missing debug symbols.");
         }
 
-        let filter = Filter::new(object, &keywords);
+        let filter = Filter::new(object, &keywords, no_demangle);
 
         let mut count = 0;
         let stdout = io::stdout();

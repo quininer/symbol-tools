@@ -38,3 +38,53 @@ where
     map.shrink_to_fit();
     map
 }
+
+pub trait IteratorExt: Iterator {
+    fn flat_result<U, T, E>(self) -> FlatResultIter<Self, U, T, E>
+    where
+        Self: Iterator<Item = Result<U, E>> + Sized,
+        U: IntoIterator<Item = Result<T, E>>
+    {
+        FlatResultIter {
+            iter: self,
+            subiter: None,
+            _phantom: Default::default()
+        }
+    }
+}
+
+impl<I: Iterator> IteratorExt for I {}
+
+pub struct FlatResultIter<I, U, T, E>
+where
+    U: IntoIterator<Item = Result<T, E>>
+{
+    iter: I,
+    subiter: Option<U::IntoIter>,
+    _phantom: std::marker::PhantomData<(T, E)>
+}
+
+impl<I, U, T, E> Iterator for FlatResultIter<I, U, T, E>
+where
+    I: Iterator<Item = Result<U, E>>,
+    U: IntoIterator<Item = Result<T, E>>
+{
+    type Item = Result<T, E>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.subiter.is_none() {
+                self.subiter = match self.iter.next() {
+                    Some(Ok(iter)) => Some(iter.into_iter()),
+                    Some(Err(err)) => return Some(Err(err)),
+                    None => None
+                };
+            }
+
+            match self.subiter.as_mut()?.next() {
+                Some(output) => return Some(output),
+                None => self.subiter = None
+            }
+        }
+    }
+}
