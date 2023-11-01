@@ -18,3 +18,4 @@ rustc-demangle = "0.1"
 # explorer
 rustyline = "12"
 capstone = "0.11"
+indexmap = "2"

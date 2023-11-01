@@ -3,7 +3,6 @@ use std::io::Write;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::borrow::Cow;
-use std::collections::HashMap;
 use aho_corasick::AhoCorasick;
 use anyhow::Context;
 use argh::FromArgs;
@@ -13,6 +12,7 @@ use object::{ Object, ObjectSection, ObjectSymbol };
 use object::read::archive::ArchiveFile;
 use object::read::File;
 use memmap2::Mmap;
+use indexmap::IndexMap;
 use crate::common::IteratorExt;
 
 
@@ -164,35 +164,13 @@ fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, line: &str) -> anyhow::Result<(
                 let name = namebuf.as_slice();
 
                 if ac.is_match(&name) || keywords.iter().any(|w| mangled_name.ends_with(w)) {
-                    for pos in syms {
-                        use object::{ SymbolSection, SectionKind };
-
+                    for &pos in syms {
                         let obj = &explorer.list[pos.obj_idx];
                         let sym = obj.file.symbol_by_index(pos.sym_idx)?;
+                        let kind = explorer.symbol_kind(pos);
 
-                        let mut kind = match sym.section() {
-                            SymbolSection::Undefined => 'U',
-                            SymbolSection::Absolute => 'A',
-                            SymbolSection::Common => 'C',
-                            SymbolSection::Section(idx) => match obj.file.section_by_index(idx).map(|section| section.kind()) {
-                                Ok(SectionKind::Text) => 't',
-                                Ok(SectionKind::Data) | Ok(SectionKind::Tls) | Ok(SectionKind::TlsVariables) => {
-                                    'd'
-                                }
-                                Ok(SectionKind::ReadOnlyData) | Ok(SectionKind::ReadOnlyString) => 'r',
-                                Ok(SectionKind::UninitializedData) | Ok(SectionKind::UninitializedTls) => 'b',
-                                Ok(SectionKind::Common) => 'C',
-                                _ => '?',
-                            },
-                            _ => '?',
-                        };
-
-                        if sym.is_global() {
-                            kind = kind.to_ascii_uppercase();
-                        }
-
-                        println!("{:022p} {} {} @ {:?}",
-                            sym.address() as *const (),
+                        println!("{:016x} {} {} @ {:?}",
+                            sym.address(),
                             kind,
                             mangled_name,
                             obj.name.as_bstr(),
@@ -213,12 +191,12 @@ fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, line: &str) -> anyhow::Result<(
                 let idx: usize = idx.parse().context("need index number")?;
                 syms.get(idx).context("index too large")?.clone()
             } else {
-                for (idx, pos) in syms.iter()
+                for (idx, &pos) in syms.iter()
                     .enumerate()
-                    .filter(|(_, &pos)| explorer.index(pos).is_ok())
                 {
                     let name = &explorer.list[pos.obj_idx].name;
-                    eprintln!("[{}] by {:?}", idx, name.as_bstr());
+                    let kind = explorer.symbol_kind(pos);
+                    eprintln!("[{}] {} by {:?}", idx, kind, name.as_bstr());
                 }
 
                 anyhow::bail!("duplicate symbol");
@@ -227,13 +205,18 @@ fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, line: &str) -> anyhow::Result<(
             let sym = explorer.index(pos)?;
             let data = explorer.dump(&sym)?;
 
-            let insns = explorer.disasm.disasm_all(data, sym.address)
-                .map_err(|err| anyhow::format_err!("disasm failed: {:?}", err))?;
+            if matches!(sym.kind, 't' | 'T') {
+                let insns = explorer.disasm.disasm_all(data, sym.address)
+                    .map_err(|err| anyhow::format_err!("disasm failed: {:?}", err))?;
 
-            for ins in insns.iter() {
-                println!("{}", ins);
+                for ins in insns.iter() {
+                    println!("{}", ins);
+                }
+            } else {
+                // TODO print hex
             }
         },
+        Some(cmd) if !cmd.trim().is_empty() => anyhow::bail!("unknown command"),
         _ => ()
     }
 
@@ -243,10 +226,10 @@ fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, line: &str) -> anyhow::Result<(
 struct Explorer<'a, 'buf> {
     list: &'a [ObjectFile<'buf>],
     symmap_list: Vec<object::read::SymbolMap<object::read::SymbolMapName<'buf>>>,
-    arch: object::Architecture,
+    #[allow(dead_code)] arch: object::Architecture,
     format: object::BinaryFormat,
     disasm: capstone::Capstone,
-    symbol_map: HashMap<&'buf str, Vec<SymbolPosition>>
+    symbol_map: IndexMap<&'buf str, Vec<SymbolPosition>>
 }
 
 #[derive(Clone, Copy)]
@@ -259,7 +242,8 @@ struct Symbol {
     pos: SymbolPosition,
     section_idx: object::read::SectionIndex,
     address: u64,
-    size: u64
+    size: u64,
+    kind: char
 }
 
 impl<'a, 'buf> Explorer<'a, 'buf> {
@@ -290,12 +274,12 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
             (arch, format)
         };
 
-        let symmap_list = if format == object::BinaryFormat::MachO {
+        let symmap_list = if format != object::BinaryFormat::MachO {
+            Vec::new()
+        } else {
             list.iter()
                 .map(|obj| obj.file.symbol_map())
                 .collect::<Vec<_>>()
-        } else {
-            Vec::new()
         };
 
         let disasm = capstone::Capstone::new();
@@ -312,7 +296,7 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
         };
         let disasm = disasm.map_err(|err| anyhow::format_err!("build capstone failed: {:?}", err))?;
 
-        let mut symbol_map: HashMap<_, Vec<SymbolPosition>> = HashMap::new();
+        let mut symbol_map: IndexMap<_, Vec<SymbolPosition>> = IndexMap::new();
         for (idx, obj) in list.iter().enumerate() {
             for sym in obj.file.symbols() {
                 let sym_name = match sym.name() {
@@ -325,9 +309,11 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
                 };
                 symbol_map.entry(sym_name)
                     .or_default()
-                    .push(pos.clone());
+                    .push(pos);
             }
         }
+        symbol_map.values_mut().for_each(|list| list.shrink_to_fit());
+        symbol_map.shrink_to_fit();
 
         Ok(Explorer {
             list, symmap_list, arch, format, disasm,
@@ -350,7 +336,9 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
             section => anyhow::bail!("bad section: {:?}", section)
         };
 
-        let size = if self.format == object::BinaryFormat::MachO {
+        let size = if self.format != object::BinaryFormat::MachO {
+            sym.size()
+        } else {
             let symmap = &self.symmap_list[pos.obj_idx];
             let idx = match symmap.symbols()
                 .binary_search_by_key(&sym.address(), |sym| sym.address())
@@ -366,14 +354,14 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
                     section.address() + section.size() - sym.address()
                 }
             }
-        } else {
-            sym.size()
         };
+
+        let kind = self.symbol_kind(pos);
 
         Ok(Symbol {
             pos, section_idx,
             address: sym.address(),
-            size
+            size, kind
         })
     }
 
@@ -385,5 +373,35 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
         let data = section.data_range(sym.address, sym.size)?;
         let data = data.context("the section does not contain the given range")?;
         Ok(data)
+    }
+
+    fn symbol_kind(&self, pos: SymbolPosition) -> char {
+        use object::{ SymbolSection, SectionKind };
+
+        let obj = &self.list[pos.obj_idx];
+        let sym = obj.file.symbol_by_index(pos.sym_idx).unwrap();
+
+        let mut kind = match sym.section() {
+            SymbolSection::Undefined => 'U',
+            SymbolSection::Absolute => 'A',
+            SymbolSection::Common => 'C',
+            SymbolSection::Section(idx) => match obj.file.section_by_index(idx).map(|section| section.kind()) {
+                Ok(SectionKind::Text) => 't',
+                Ok(SectionKind::Data) | Ok(SectionKind::Tls) | Ok(SectionKind::TlsVariables) => {
+                    'd'
+                }
+                Ok(SectionKind::ReadOnlyData) | Ok(SectionKind::ReadOnlyString) => 'r',
+                Ok(SectionKind::UninitializedData) | Ok(SectionKind::UninitializedTls) => 'b',
+                Ok(SectionKind::Common) => 'C',
+                _ => '?',
+            },
+            _ => '?',
+        };
+
+        if sym.is_global() {
+            kind = kind.to_ascii_uppercase();
+        }
+
+        kind
     }
 }
