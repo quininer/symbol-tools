@@ -1,11 +1,14 @@
 use std::fs;
+use std::io::Write;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use aho_corasick::AhoCorasick;
 use anyhow::Context;
 use argh::FromArgs;
 use bstr::ByteSlice;
+use rustc_demangle::demangle;
 use object::{ Object, ObjectSection, ObjectSymbol };
 use object::read::archive::ArchiveFile;
 use object::read::File;
@@ -123,7 +126,7 @@ fn explorer(list: &[ObjectFile<'_>]) -> anyhow::Result<()> {
     loop {
         match rl.readline("explorer > ") {
             Ok(line) => if let Err(err) = exec(&mut explorer, &line) {
-                eprintln!("exec failed: {:?}", err);
+                eprintln!("failed: {:?}", err);
             },
             Err(ReadlineError::WindowResized) => (),
             Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => break,
@@ -147,9 +150,60 @@ fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, line: &str) -> anyhow::Result<(
                     .collect::<Vec<_>>()
             );
         },
+        Some("search") => {
+            let keywords = iter.collect::<Vec<_>>();
+            if keywords.is_empty() {
+                anyhow::bail!("need keyword");
+            }
+            let ac = AhoCorasick::new(&keywords)?;
+
+            let mut namebuf = Vec::new();
+            for (mangled_name, syms) in explorer.symbol_map.iter() {
+                namebuf.clear();
+                write!(&mut namebuf, "{}", demangle(mangled_name))?;
+                let name = namebuf.as_slice();
+
+                if ac.is_match(&name) || keywords.iter().any(|w| mangled_name.ends_with(w)) {
+                    for pos in syms {
+                        use object::{ SymbolSection, SectionKind };
+
+                        let obj = &explorer.list[pos.obj_idx];
+                        let sym = obj.file.symbol_by_index(pos.sym_idx)?;
+
+                        let mut kind = match sym.section() {
+                            SymbolSection::Undefined => 'U',
+                            SymbolSection::Absolute => 'A',
+                            SymbolSection::Common => 'C',
+                            SymbolSection::Section(idx) => match obj.file.section_by_index(idx).map(|section| section.kind()) {
+                                Ok(SectionKind::Text) => 't',
+                                Ok(SectionKind::Data) | Ok(SectionKind::Tls) | Ok(SectionKind::TlsVariables) => {
+                                    'd'
+                                }
+                                Ok(SectionKind::ReadOnlyData) | Ok(SectionKind::ReadOnlyString) => 'r',
+                                Ok(SectionKind::UninitializedData) | Ok(SectionKind::UninitializedTls) => 'b',
+                                Ok(SectionKind::Common) => 'C',
+                                _ => '?',
+                            },
+                            _ => '?',
+                        };
+
+                        if sym.is_global() {
+                            kind = kind.to_ascii_uppercase();
+                        }
+
+                        println!("{:022p} {} {} @ {:?}",
+                            sym.address() as *const (),
+                            kind,
+                            mangled_name,
+                            obj.name.as_bstr(),
+                        );
+                    }
+                }
+            }
+        },
         Some("dump") => {
             let name = iter.next().context("need symbol name")?;
-            let syms = explorer.search(name)?;
+            let syms = explorer.get(name)?;
 
             assert!(!syms.is_empty());
 
@@ -164,7 +218,7 @@ fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, line: &str) -> anyhow::Result<(
                     .filter(|(_, &pos)| explorer.index(pos).is_ok())
                 {
                     let name = &explorer.list[pos.obj_idx].name;
-                    eprintln!("[{}] {:?}", idx, name.as_bstr());
+                    eprintln!("[{}] by {:?}", idx, name.as_bstr());
                 }
 
                 anyhow::bail!("duplicate symbol");
@@ -258,36 +312,33 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
         };
         let disasm = disasm.map_err(|err| anyhow::format_err!("build capstone failed: {:?}", err))?;
 
-        Ok(Explorer {
-            list, symmap_list, arch, format, disasm,
-            symbol_map: HashMap::default()
-        })
-    }
-
-    fn search(&mut self, name: &str) -> anyhow::Result<Vec<SymbolPosition>> {
-        if self.symbol_map.is_empty() {
-            for (idx, obj) in self.list.iter().enumerate() {
-                for sym in obj.file.symbols() {
-                    let sym_name = match sym.name() {
-                        Ok(name) => name,
-                        Err(err) => anyhow::bail!("bad symbol name: {:?}", err)
-                    };
-                    let pos = SymbolPosition {
-                        obj_idx: idx,
-                        sym_idx: sym.index()
-                    };
-                    self.symbol_map.entry(sym_name)
-                        .or_default()
-                        .push(pos.clone());
-                }
+        let mut symbol_map: HashMap<_, Vec<SymbolPosition>> = HashMap::new();
+        for (idx, obj) in list.iter().enumerate() {
+            for sym in obj.file.symbols() {
+                let sym_name = match sym.name() {
+                    Ok(name) => name,
+                    Err(err) => anyhow::bail!("bad symbol name: {:?}", err)
+                };
+                let pos = SymbolPosition {
+                    obj_idx: idx,
+                    sym_idx: sym.index()
+                };
+                symbol_map.entry(sym_name)
+                    .or_default()
+                    .push(pos.clone());
             }
         }
 
-        if let Some(sym) = self.symbol_map.get(name) {
-            Ok(sym.clone())
-        } else {
-            anyhow::bail!("not found symbol")
-        }
+        Ok(Explorer {
+            list, symmap_list, arch, format, disasm,
+            symbol_map
+        })
+    }
+
+    fn get<'list>(&'list self, name: &str) -> anyhow::Result<&'list [SymbolPosition]> {
+        self.symbol_map.get(name)
+            .map(|syms| syms.as_slice())
+            .context("not found symbol")
     }
 
     fn index(&self, pos: SymbolPosition) -> anyhow::Result<Symbol> {
