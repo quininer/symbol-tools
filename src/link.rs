@@ -1,3 +1,5 @@
+//! https://stffrdhrn.github.io/hardware/embedded/openrisc/2019/11/29/relocs.html
+
 use std::fs;
 use std::io::Write;
 use std::ffi::OsStr;
@@ -14,7 +16,7 @@ use object::read::archive::ArchiveFile;
 use object::read::File;
 use memmap2::Mmap;
 use indexmap::IndexMap;
-use crate::common::{ IteratorExt, DoubleLife, data_range };
+use crate::common::{ IteratorExt, DoubleLife, data_range, print_pretty_bytes };
 
 
 /// Cross-platform Symbol Explorer
@@ -139,12 +141,27 @@ fn explorer(list: &[ObjectFile<'_>]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, cache: &mut Cache, line: &str)
+fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, cache: &mut Cache<'buf>, line: &str)
     -> anyhow::Result<()>
 {
     let mut iter = line.trim().split_whitespace();
 
     match iter.next() {
+        Some("obj") => match iter.next() {
+            Some("none") => explorer.current_obj_idx = None,
+            Some(name) => {
+                let obj_idx = explorer.list.iter()
+                    .enumerate()
+                    .find(|(_, obj)| obj.name == name.as_bytes())
+                    .map(|(idx, _)| idx)
+                    .context("not found object")?;
+                explorer.current_obj_idx = Some(obj_idx);
+            }
+            None => match explorer.current_obj_idx {
+                Some(obj_idx) => println!("{}", explorer.list[obj_idx].name.as_bstr()),
+                None => println!("none")
+            }
+        },
         Some("section") => for obj in explorer.list {
             println!("{:?}: {:#?}",
                 obj.name.as_bstr(),
@@ -161,9 +178,10 @@ fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, cache: &mut Cache, line: &str)
             }
             let ac = AhoCorasick::new(&keywords)?;
 
-            let mut namebuf = Vec::new();
-            for (mangled_name, syms) in explorer.symbol_map.iter() {
-                namebuf.clear();
+            explorer.symbol_map.iter().fast_for_each(|(mangled_name, syms)| -> anyhow::Result<()> {
+                use smallvec::SmallVec;
+
+                let mut namebuf = SmallVec::<[u8; 1024 * 4]>::new();
                 write!(&mut namebuf, "{}", demangle(mangled_name))?;
                 let name = namebuf.as_slice();
 
@@ -181,45 +199,99 @@ fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, cache: &mut Cache, line: &str)
                         );
                     }
                 }
-            }
+
+                Ok(())
+            })?;
         },
         Some("dump") => {
             let name = iter.next().context("need symbol name")?;
             let syms = explorer.get(name)?;
 
-            assert!(!syms.is_empty());
-
-            let pos = if syms.len() == 1 {
-                syms[0].clone()
-            } else if let Some(idx) = iter.next() {
-                let idx: usize = idx.parse().context("need index number")?;
-                syms.get(idx).context("index too large")?.clone()
-            } else {
-                for (idx, &pos) in syms.iter()
-                    .enumerate()
-                {
-                    let name = &explorer.list[pos.obj_idx].name;
-                    let kind = explorer.symbol_kind(pos);
-                    eprintln!("[{}] {} by {:?}", idx, kind, name.as_bstr());
+            let pos = match select(explorer, syms, iter.next())? {
+                Some(pos) => pos,
+                None => {
+                    print_syms_list(explorer, &syms)?;
+                    anyhow::bail!("duplicate symbol");
                 }
-
-                anyhow::bail!("duplicate symbol");
             };
 
-            let sym = explorer.index(pos)?;
+            let sym = explorer.index(cache, pos)?;
             let data = explorer.dump(cache, &sym)?;
             let data = data.as_ref();
+            let obj = &explorer.list[sym.pos.obj_idx];
+            let section = obj.file.section_by_index(sym.section_idx)?;
+            let address = sym.address - section.address();
+
+            println!("{:016x} {} {} @ {}/{}",
+                sym.address,
+                sym.kind,
+                sym.size,
+                obj.name.as_bstr(),
+                section.name()?
+            );
 
             if matches!(sym.kind, 't' | 'T') {
-                let insns = explorer.disasm.disasm_all(data, sym.address)
+                let disasm = (explorer.disasm)()?;
+                let insns = disasm.disasm_all(data, address)
                     .map_err(|err| anyhow::format_err!("disasm failed: {:?}", err))?;
 
                 for ins in insns.iter() {
                     println!("{}", ins);
                 }
             } else {
-                println!("TODO");
-                // TODO print hex
+                let stdout = std::io::stdout();
+                let mut stdout = stdout.lock();
+
+                print_pretty_bytes(&mut stdout, address, data)?;
+            }
+        },
+        Some("reloc") => {
+            let name = iter.next().context("need symbol name")?;
+            let syms = explorer.get(name)?;
+
+            let pos = match select(explorer, syms, iter.next())? {
+                Some(pos) => pos,
+                None => {
+                    print_syms_list(explorer, &syms)?;
+                    anyhow::bail!("duplicate symbol");
+                }
+            };
+
+            let sym = explorer.index(cache, pos)?;
+            let list = explorer.reloc(cache, &sym)?;
+            let obj = &explorer.list[sym.pos.obj_idx];
+
+            let stdout = std::io::stdout();
+            let mut stdout = stdout.lock();
+
+            if !list.is_empty() {
+                writeln!(stdout, "OFFSET           ADDEND               TYPE    ADDRESS          NAME")?;
+            }
+
+            for reloc in &list {
+                let (ty, addr, name) = match &reloc.target {
+                    RelocationTarget::Symbol(idx) => {
+                        let sym = obj.file.symbol_by_index(*idx)?;
+                        let addr = sym.address();
+                        let name = sym.name()?.to_string();
+                        ("symbol", addr, name)
+                    },
+                    RelocationTarget::Section(idx) => {
+                        let section = obj.file.section_by_index(*idx)?;
+                        let addr = section.address();
+                        let name = section.name()?.to_string();
+                        ("section", addr, name)
+                    }
+                };
+
+                writeln!(stdout,
+                    "{:016x} {:<20} {:<7} {:016x} {}",
+                    reloc.offset,
+                    reloc.addend,
+                    ty,
+                    addr,
+                    name
+                )?;
             }
         },
         Some(cmd) if !cmd.trim().is_empty() => anyhow::bail!("unknown command"),
@@ -231,16 +303,18 @@ fn exec<'buf>(explorer: &mut Explorer<'_, 'buf>, cache: &mut Cache, line: &str)
 
 struct Explorer<'a, 'buf> {
     list: &'a [ObjectFile<'buf>],
-    symmap_list: Vec<object::read::SymbolMap<object::read::SymbolMapName<'buf>>>,
     #[allow(dead_code)] arch: object::Architecture,
     format: object::BinaryFormat,
-    disasm: capstone::Capstone,
+    disasm: fn() -> anyhow::Result<capstone::Capstone>,
     symbol_map: IndexMap<&'buf str, Vec<SymbolPosition>>,
+    current_obj_idx: Option<usize>
 }
 
 #[derive(Default)]
-struct Cache {
-    decompress_sections: HashMap<(usize, object::read::SectionIndex), (u64, Vec<u8>)>
+struct Cache<'buf> {
+    symmap_list: Vec<object::read::SymbolMap<object::read::SymbolMapName<'buf>>>,
+    decompress_sections: HashMap<(usize, object::read::SectionIndex), (u64, Vec<u8>)>,
+    reloc_list: Vec<HashMap<object::read::SectionIndex, Vec<(u64, object::read::Relocation)>>>
 }
 
 #[derive(Clone, Copy)]
@@ -255,6 +329,19 @@ struct Symbol {
     address: u64,
     size: u64,
     kind: char
+}
+
+#[derive(Debug)]
+struct Relocation {
+    offset: u64,
+    target: RelocationTarget,
+    addend: i64
+}
+
+#[derive(Debug)]
+enum RelocationTarget {
+    Symbol(object::read::SymbolIndex),
+    Section(object::read::SectionIndex)
 }
 
 impl<'a, 'buf> Explorer<'a, 'buf> {
@@ -285,27 +372,23 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
             (arch, format)
         };
 
-        let symmap_list = if format != object::BinaryFormat::MachO {
-            Vec::new()
-        } else {
-            list.iter()
-                .map(|obj| obj.file.symbol_map())
-                .collect::<Vec<_>>()
-        };
-
-        let disasm = capstone::Capstone::new();
         let disasm = match arch {
-            object::Architecture::Aarch64 => disasm
-                .arm64()
-                .mode(capstone::arch::arm64::ArchMode::Arm)
-                .build(),
-            object::Architecture::X86_64 => disasm
-                .x86()
-                .mode(capstone::arch::x86::ArchMode::Mode64)
-                .build(),
+            object::Architecture::Aarch64 => || {
+                capstone::Capstone::new()
+                    .arm64()
+                    .mode(capstone::arch::arm64::ArchMode::Arm)
+                    .build()
+                    .map_err(|err| anyhow::format_err!("build capstone failed: {:?}", err))
+            },
+            object::Architecture::X86_64 => || {
+                capstone::Capstone::new()
+                    .x86()
+                    .mode(capstone::arch::x86::ArchMode::Mode64)
+                    .build()
+                    .map_err(|err| anyhow::format_err!("build capstone failed: {:?}", err))
+            },
             _ => anyhow::bail!("unsupport arch: {:?}", arch)
         };
-        let disasm = disasm.map_err(|err| anyhow::format_err!("build capstone failed: {:?}", err))?;
 
         let mut symbol_map: IndexMap<_, Vec<SymbolPosition>> = IndexMap::new();
         for (idx, obj) in list.iter().enumerate() {
@@ -327,8 +410,9 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
         symbol_map.shrink_to_fit();
 
         Ok(Explorer {
-            list, symmap_list, arch, format, disasm,
-            symbol_map
+            list, arch, format, disasm,
+            symbol_map,
+            current_obj_idx: None
         })
     }
 
@@ -338,7 +422,7 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
             .context("not found symbol")
     }
 
-    fn index(&self, pos: SymbolPosition) -> anyhow::Result<Symbol> {
+    fn index(&self, cache: &mut Cache<'buf>, pos: SymbolPosition) -> anyhow::Result<Symbol> {
         let sym = self.list[pos.obj_idx].file.symbol_by_index(pos.sym_idx)?;
 
         let section_idx = match sym.section() {
@@ -350,12 +434,14 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
         let size = if self.format != object::BinaryFormat::MachO {
             sym.size()
         } else {
-            let symmap = &self.symmap_list[pos.obj_idx];
+            cache.init_symmap(self)?;
+
+            let symmap = &cache.symmap_list[pos.obj_idx];
             let idx = match symmap.symbols()
                 .binary_search_by_key(&sym.address(), |sym| sym.address())
             {
                 Ok(idx) => idx,
-                Err(idx) => idx.checked_sub(1).context("not found address by symbol map")?
+                Err(_) => anyhow::bail!("not found symbol address")
             };
             match symmap.symbols().get(idx + 1) {
                 Some(next_addr) => next_addr.address() - sym.address(),
@@ -376,7 +462,9 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
         })
     }
 
-    fn dump<'cache>(&self, cache: &'cache mut Cache, sym: &Symbol) -> anyhow::Result<DoubleLife<'cache, 'buf, [u8]>> {
+    fn dump<'cache>(&self, cache: &'cache mut Cache<'buf>, sym: &Symbol)
+        -> anyhow::Result<DoubleLife<'cache, 'buf, [u8]>>
+    {
         use std::collections::hash_map::Entry;
 
         let cache_idx = (sym.pos.obj_idx, sym.section_idx);
@@ -405,6 +493,36 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
                 }
             }
         }
+    }
+
+    fn reloc<'cache>(&self, cache: &'cache mut Cache<'buf>, sym: &Symbol)
+        -> anyhow::Result<Vec<Relocation>>
+    {
+        cache.init_reloc(self, &sym)?;
+
+        let relocs = cache.reloc_list[sym.pos.obj_idx]
+            .get(&sym.section_idx)
+            .unwrap();
+        let section = self.list[sym.pos.obj_idx].file.section_by_index(sym.section_idx)?;
+
+        let address = sym.address - section.address();
+        let start = relocs.partition_point(|(offset, _)| *offset < address);
+        let end = relocs.partition_point(|(offset, _)| *offset < address + sym.size);
+
+        let mut list = Vec::new();
+        for (offset, reloc) in relocs.get(start..end).unwrap_or_default() {
+            list.push(Relocation {
+                offset: *offset,
+                target: match reloc.target() {
+                    object::read::RelocationTarget::Symbol(idx) => RelocationTarget::Symbol(idx),
+                    object::read::RelocationTarget::Section(idx) => RelocationTarget::Section(idx),
+                    _ => anyhow::bail!("not support target: {:?}", reloc)
+                },
+                addend: reloc.addend()
+            });
+        }
+
+        Ok(list)
     }
 
     fn symbol_kind(&self, pos: SymbolPosition) -> char {
@@ -436,4 +554,91 @@ impl<'a, 'buf> Explorer<'a, 'buf> {
 
         kind
     }
+}
+
+impl<'buf> Cache<'buf> {
+    fn init_symmap(&mut self, explorer: &Explorer<'_, 'buf>) -> anyhow::Result<()> {
+        if explorer.format != object::BinaryFormat::MachO || !self.symmap_list.is_empty() {
+            return Ok(())
+        }
+
+        self.symmap_list = explorer.list.iter()
+            .map(|obj| obj.file.symbol_map())
+            .collect::<Vec<_>>();
+
+        Ok(())
+    }
+
+    fn init_reloc(&mut self, explorer: &Explorer<'_, 'buf>, sym: &Symbol)
+        -> anyhow::Result<()>
+    {
+        if self.reloc_list.is_empty() {
+            self.reloc_list = explorer
+                .list
+                .iter()
+                .map(|_| HashMap::new())
+                .collect::<Vec<_>>()
+        }
+
+        let obj = &explorer.list[sym.pos.obj_idx];
+
+        let map = &mut self.reloc_list[sym.pos.obj_idx];
+        let list = map.entry(sym.section_idx).or_default();
+
+        if list.is_empty() {
+            let section = obj.file.section_by_index(sym.section_idx)?;
+
+            for (offset, reloc) in section.relocations() {
+                list.push((offset, reloc));
+            }
+
+            list.sort_by_key(|(offset, _)| *offset);
+            list.shrink_to_fit();
+        }
+
+        Ok(())
+    }
+}
+
+fn print_syms_list(
+    explorer: &Explorer<'_, '_>,
+    syms: &[SymbolPosition]
+) -> anyhow::Result<()> {
+    for (idx, &pos) in syms.iter()
+        .enumerate()
+    {
+        let name = &explorer.list[pos.obj_idx].name;
+        let kind = explorer.symbol_kind(pos);
+        eprintln!("[{}] {} by {:?}", idx, kind, name.as_bstr());
+    }
+
+    Ok(())
+}
+
+fn select(explorer: &Explorer<'_, '_>, syms: &[SymbolPosition], iter: Option<&str>)
+    -> anyhow::Result<Option<SymbolPosition>>
+{
+    assert!(!syms.is_empty());
+
+    let syms = if syms.len() == 1 {
+        Cow::Borrowed(syms)
+    } else if let Some(obj_idx) = explorer.current_obj_idx {
+        let syms = syms.iter()
+            .filter(|sym| sym.obj_idx == obj_idx)
+            .copied()
+            .collect::<Vec<_>>();
+        Cow::Owned(syms)
+    } else {
+        Cow::Borrowed(syms)
+    };
+
+    Ok(if syms.len() == 1 {
+        Some(syms[0])
+    } else if let Some(idx) = iter {
+        let idx: usize = idx.parse().context("need index number")?;
+        let pos = syms.get(idx).copied().context("index too large")?;
+        Some(pos)
+    } else {
+        None
+    })
 }

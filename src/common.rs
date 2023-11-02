@@ -51,6 +51,25 @@ pub trait IteratorExt: Iterator {
             _phantom: Default::default()
         }
     }
+
+    fn fast_for_each<F, E>(mut self, f: F)
+        -> Result<(), E>
+    where
+        Self: Sized + Send,
+        Self::Item: Send,
+        F: Fn(Self::Item) -> Result<(), E> + Send + Sync,
+        E: Send
+    {
+        use rayon::prelude::*;
+
+        let (lower_bound, _) = self.size_hint();
+
+        if lower_bound > 1024 * 1024 {
+            self.par_bridge().try_for_each(f)
+        } else {
+            self.try_for_each(f)
+        }
+    }
 }
 
 impl<I: Iterator> IteratorExt for I {}
@@ -121,4 +140,63 @@ pub fn data_range<'data>(
     data.get(offset..)
         .and_then(|data| data.get(..size))
         .context("section range overflow")
+}
+
+pub fn print_pretty_bytes(
+    stdout: &mut dyn std::io::Write,
+    base: u64,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
+    use std::fmt;
+
+    struct HexPrinter<'a>(&'a [u8]);
+    struct AsciiPrinter<'a>(&'a [u8]);
+
+    impl fmt::Display for HexPrinter<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            for &b in self.0.iter() {
+                write!(f, "{:02x} ", b)?;
+            }
+
+            for _ in self.0.len()..16 {
+                write!(f, "   ")?;
+            }
+
+            Ok(())
+        }
+    }
+
+    impl fmt::Display for AsciiPrinter<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            use std::fmt::Write;
+
+            for &b in self.0.iter() {
+                let c = b as char;
+                let c = if c.is_ascii_graphic() {
+                    c
+                } else {
+                    '.'
+                };
+                f.write_char(c)?;
+            }
+
+            Ok(())
+        }
+    }
+
+    let addr = base as *const u8;
+
+    for (offset, chunk) in bytes.chunks(16).enumerate() {
+        let addr = addr.wrapping_add(offset * 16);
+
+        writeln!(
+            stdout,
+            "{:018p}: {} {}",
+            addr,
+            HexPrinter(chunk),
+            AsciiPrinter(chunk)
+        )?;
+    }
+
+    Ok(())
 }

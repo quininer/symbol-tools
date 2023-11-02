@@ -19,3 +19,5 @@ rustc-demangle = "0.1"
 rustyline = "12"
 capstone = "0.11"
 indexmap = "2"
+rayon = "1"
+smallvec = { version = "1", features = [ "write" ] }
