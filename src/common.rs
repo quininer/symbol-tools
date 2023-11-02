@@ -62,9 +62,12 @@ pub trait IteratorExt: Iterator {
     {
         use rayon::prelude::*;
 
-        let (lower_bound, _) = self.size_hint();
+        let (_, upper_bound) = self.size_hint();
 
-        if lower_bound > 1024 * 1024 {
+        if upper_bound
+            .filter(|&upper_bound| upper_bound < 1024 * 16)
+            .is_none()
+        {
             self.par_bridge().try_for_each(f)
         } else {
             self.try_for_each(f)
